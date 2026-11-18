@@ -38,7 +38,81 @@ Gợi ý
 from ..common import WARN, Issue, iou_xywh, parse_yolo_line  # noqa: F401
 from ..model_cache import get_preds  # noqa: F401
 
+CHECK = "second_opinion"
+
+
+def _labels_with_lines(ds, stem):
+    """[(số dòng gốc, lớp, (cx, cy, w, h))] của các dòng nhãn hợp lệ; dòng hỏng bị bỏ qua (label_format đã báo)."""
+    out = []
+    n_classes = len(ds.classes)
+    for ln, text in ds.read_label_lines(stem) or []:
+        try:
+            c, x, y, w, h = parse_yolo_line(text)
+        except ValueError:
+            continue
+        if 0 <= c < n_classes:
+            out.append((ln, c, (x, y, w, h)))
+    return out
+
+
+def _check_image(ds, stem, preds, p, size):
+    issues = []
+    W, H = size
+    labels = _labels_with_lines(ds, stem)
+    names = ds.classes
+
+    def cname(c):
+        return names[c] if 0 <= c < len(names) else str(c)
+
+    # --- mỗi dự đoán đáng tin -> tối đa 1 issue (MISSING / LOOSE_BOX / WRONG_CLASS)
+    for r in preds:
+        rc, rconf, rbox = int(r[0]), float(r[1]), tuple(float(v) for v in r[2:6])
+        if rconf < p["conf"] or rbox[2] * W * rbox[3] * H < p["min_area_px"]:
+            continue
+        cands = [(iou_xywh(rbox, lb), lc) for _, lc, lb in labels]
+        cands = [(iou, lc) for iou, lc in cands if iou >= p["iou_missing"]]
+        if not cands:
+            issues.append(Issue(CHECK, WARN, "POSSIBLE_MISSING", stem,
+                                f"model thấy {cname(rc)} (conf {rconf:.2f}) nhưng nhãn không có box nào",
+                                extra={"conf": round(rconf, 4), "pred_class": rc, "box": [round(v, 4) for v in rbox]}))
+            continue
+        same = [iou for iou, lc in cands if lc == rc]
+        if same:
+            best = max(same)
+            if best < p["iou_loose"]:
+                issues.append(Issue(CHECK, WARN, "POSSIBLE_LOOSE_BOX", stem,
+                                    f"box {cname(rc)} lệch/lỏng so với model (IoU {best:.2f})",
+                                    extra={"conf": round(rconf, 4), "iou": round(best, 4), "pred_class": rc}))
+            continue                                        # nhãn đúng lớp đã phủ vật này
+        best_iou, best_c = max(cands)                       # chỉ còn cands khác lớp
+        if best_iou >= p["iou_match"]:
+            issues.append(Issue(CHECK, WARN, "POSSIBLE_WRONG_CLASS", stem,
+                                f"nhãn {cname(best_c)} nhưng model nói {cname(rc)} (conf {rconf:.2f}, IoU {best_iou:.2f})",
+                                extra={"conf": round(rconf, 4), "iou": round(best_iou, 4), "pred_class": rc, "label_class": best_c}))
+        # IoU khác lớp trong [iou_missing, iou_match): mơ hồ -> không cờ
+
+    # --- mỗi box nhãn không khớp dự đoán nào (conf >= fp_conf, KHÔNG lọc diện tích) -> FALSE_POS
+    fp_preds = [tuple(float(v) for v in r[2:6]) for r in preds if float(r[1]) >= p["fp_conf"]]
+    for ln, lc, lb in labels:
+        best = max((iou_xywh(lb, rb) for rb in fp_preds), default=0.0)
+        if best < p["iou_missing"]:
+            issues.append(Issue(CHECK, WARN, "POSSIBLE_FALSE_POS", stem,
+                                f"box {cname(lc)} không khớp vật nào model thấy (IoU tốt nhất {best:.2f})", ln,
+                                {"iou": round(best, 4), "label_class": lc}))
+    return issues
+
 
 def run(ds, cfg, preds=None):
-    # TODO
-    raise NotImplementedError("check second_opinion chưa làm")
+    p = cfg["second_opinion"]
+    if preds is None:
+        preds = get_preds(ds, cfg, "checker")
+    issues = []
+    for img in ds.image_files():
+        stem = img.stem
+        if stem not in preds or ds.read_label_lines(stem) is None:     # không có dự đoán hoặc không có file nhãn
+            continue
+        size = ds.image_size(stem)
+        if size is None:                                               # ảnh hỏng: check images đã báo
+            continue
+        issues.extend(_check_image(ds, stem, preds[stem] or [], p, size))
+    return issues
