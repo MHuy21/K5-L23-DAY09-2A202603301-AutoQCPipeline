@@ -53,7 +53,23 @@ Máy tạo **35 thay đổi** (`03_fixes.csv`: 20 `drop_line`, 8 `clip_box`, 6 `
 
 ## 5. Train: raw vs clean (tùy chọn, chấm riêng)
 
-**Chưa chạy.**
+Cấu hình (giống nhau cho cả hai biến thể): `yolo26n.pt` (khởi tạo COCO), 20 epoch, `imgsz` 640, `batch` 16, seed 0 và 1, Colab Tesla T4; val = `gold_val` (40 ảnh), test = `data/test` (100 ảnh, 387 box). Chỉ khác dữ liệu train: `raw` 224 ảnh nhãn gốc, `clean` 202 ảnh của `clean_v1` (`manifest_sha1` khớp export hiện tại).
+
+| biến thể | #ảnh train | số seed | map50 (TB ± độ lệch) | map50_95 (TB ± độ lệch) | precision (TB ± độ lệch) | recall (TB ± độ lệch) |
+|---|---|---|---|---|---|---|
+| raw | 224 | 2 | 0.726 ± 0.000 | 0.512 ± 0.004 | 0.764 ± 0.061 | 0.649 ± 0.028 |
+| clean | 202 | 2 | 0.701 ± 0.025 | 0.487 ± 0.008 | 0.759 ± 0.003 | 0.625 ± 0.019 |
+
+Chênh mAP50 (clean − raw) = **−0,025**, bằng đúng độ lệch giữa 2 seed của `clean` (±0,025; hai seed cho 0,718 và 0,683). Độ lệch ±0,000 của `raw` chỉ là do 2 seed tình cờ trùng điểm (0,7256 / 0,7259), không có nghĩa `raw` ổn định hơn. Precision gần như bằng nhau (0,764 và 0,759); recall chênh 0,024, cũng nằm trong độ lệch giữa seed của `raw` (±0,028).
+**Kết luận: chưa kết luận được** `clean` tốt hơn hay kém hơn `raw`. Khác biệt nằm trong nhiễu của 2 seed × 100 ảnh test, nên tôi **không** nói "dữ liệu sạch giúp model tốt hơn".
+
+**Giả thuyết giải thích và cách kiểm:**
+1. **Model gần như không học thêm từ dữ liệu train.** Ở cả 4 lần chạy, `best.pt` (chọn theo val) rơi vào **epoch 1**: val mAP50 epoch 1 là 0,801 / 0,800 (`raw`) và 0,791 / 0,739 (`clean`), sau đó tụt xuống 0,5–0,7 rồi chỉ hồi lại khoảng 0,71–0,73 ở epoch 20. Model khởi tạo từ COCO đã biết sẵn car/person/truck/bus, nên điểm test chủ yếu phản ánh pretrained + 1 epoch, còn chất lượng nhãn train ít ảnh hưởng. *Kiểm:* đo test của chính `yolo26n.pt` khi chưa fine-tune; train lại với lr nhỏ hơn hoặc freeze backbone, rồi so lại raw và clean.
+2. **`raw` có lợi thế không công bằng: rò rỉ test.** Pipeline đã phát hiện 5 ảnh `LEAK_TEST` trong raw (`img_0049`, `img_0101`, `img_0167`, `img_0174`, `img_0221` trùng ảnh test), và chúng vẫn nằm trong 224 ảnh train của `raw` nên điểm của `raw` có thể bị thổi phồng. Ngược lại, Ultralytics tự **bỏ 11 ảnh** có nhãn/ảnh hỏng của `raw` (log: "216 images, 19 backgrounds, 11 corrupt", "Using 213 train"), tức tự làm sạch một phần lỗi cú pháp mà pipeline sửa, nên khoảng cách raw–clean bị thu hẹp. *Kiểm:* train `raw` sau khi bỏ 5 ảnh `LEAK_TEST` rồi so lại; đọc danh sách 11 ảnh bị bỏ trong log.
+3. **Lớp `truck` ít mẫu nên rất nhiễu.** AP50 của truck ở `clean` dao động 0,590 / 0,486 giữa 2 seed (raw: 0,657 / 0,640). Train `clean` chỉ có 41 box truck và `raw` có 32. Số box car giảm từ 122 (`raw`) xuống 101 (`clean`), có thể do vừa loại ảnh trùng vừa do người duyệt đổi nhãn car ↔ truck (18 cờ `POSSIBLE_WRONG_CLASS`); ranh giới hai lớp này vẫn mơ hồ. *Kiểm:* xem AP theo lớp với nhiều seed hơn; mở các ảnh truck bị đổi nhãn trong `06_review_log.csv`.
+4. **`clean` chưa thật sự sạch.** Kết luận pipeline là Hold: còn 38/202 ảnh có cảnh báo chưa ai duyệt (`07_error_list_v3`: 21 `FALSE_POS`, 20 `LOOSE_BOX`, 13 `MISSING`…).
+
+**Việc tiếp theo:** chạy ≥ 3–5 seed và báo khoảng tin cậy; thêm biến thể `oracle` (nhãn người) làm chặn trên; loại 5 ảnh `LEAK_TEST` khỏi `raw` để so công bằng; thử 40 epoch, hoặc lr nhỏ hơn để best không rơi vào epoch 1.
 
 ## 6. Quyết định và ghi chú AI
 
